@@ -1,0 +1,34 @@
+# Downloaded dataset cache (auto-fetched by wfdb on first run, ~20 MB)
+mitdb/
+
+# Trained model binaries — regenerate via `python main.py`, don't version large pickles
+models/*.joblib
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# Environments
+.env
+.venv
+env/
+venv/
+
+# Editors
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test-only scaffolding — not part of the shipped pipeline
+_test_synthetic_data.py
+parity_data.txt
+
+# NOTE: results/*.png, results/*.c, and results/summary.json are intentionally
+# tracked (NOT ignored) — they are the public-facing evidence of this experiment
+# and what the README links to.

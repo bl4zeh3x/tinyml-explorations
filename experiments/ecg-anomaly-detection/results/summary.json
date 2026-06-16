@@ -1,0 +1,17 @@
+{
+  "reference": {
+    "accuracy": 0.9796,
+    "f1_macro": 0.6403,
+    "n_nodes": 20776
+  },
+  "edge": {
+    "accuracy": 0.9722,
+    "f1_macro": 0.6687,
+    "n_nodes": 920
+  },
+  "tiny": {
+    "accuracy": 0.9587,
+    "f1_macro": 0.5558,
+    "n_nodes": 83
+  }
+}

@@ -1,0 +1,37 @@
+name: tests
+
+on:
+  push:
+    paths:
+      - "experiments/ecg-anomaly-detection/**"
+      - ".github/workflows/test.yml"
+  pull_request:
+    paths:
+      - "experiments/ecg-anomaly-detection/**"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: experiments/ecg-anomaly-detection
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run test suite
+        run: pytest tests/ -v
+
+      # gcc ships by default on ubuntu-latest runners — required for the
+      # C-export parity tests in tests/test_c_export_parity.py
+      - name: Verify gcc available for C parity tests
+        run: gcc --version
