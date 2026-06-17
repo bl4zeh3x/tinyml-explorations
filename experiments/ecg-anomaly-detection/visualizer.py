@@ -23,7 +23,7 @@ CLASS_FULL   = {
 
 
 def generate_report(results: Dict[str, Any], output_dir: Path = None) -> None:
-    """Generate all figures from cross-validated results.
+    """Generate all figures from DS2 held-out test results.
 
     Parameters
     ----------
@@ -74,7 +74,7 @@ def _plot_confusion_matrices(results: Dict[str, Any], results_dir: Path) -> None
 
     fig.suptitle(
         "ECG Arrhythmia Classification — Normalised Confusion Matrices\n"
-        "MIT-BIH Database · AAMI EC57 Classes · 5-Fold Stratified CV",
+        "MIT-BIH Database · AAMI EC57 Classes · Inter-Patient Split (DS1 train → DS2 test)",
         fontsize=12, y=1.02,
     )
     plt.tight_layout()

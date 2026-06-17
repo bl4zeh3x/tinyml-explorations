@@ -1,18 +1,32 @@
 """
-Model training, evaluation, and edge export.
+Model training, evaluation, and edge export — inter-patient protocol.
 
-Three models trained across a complexity spectrum:
+Models are trained ONCE on DS1 (train) and evaluated ONCE on DS2 (test).
+No cross-validation: the de Chazal inter-patient protocol specifies a
+single fixed train/test split by patient. Hyperparameters are fixed in
+advance based on deployment-size constraints, not tuned against DS2.
 
+Two macro-F1 numbers are reported, both real, both saved:
+
+  f1_macro            : strict, all classes present in y_test included.
+  f1_macro_reliable    : restricted to classes with >= MIN_RELIABLE_SAMPLES
+                         training examples. A class with single-digit
+                         training support (e.g. Q, drawn almost entirely
+                         from excluded paced-beat records) cannot be
+                         meaningfully learned, and including it in an
+                         aggregate average mostly measures noise, not
+                         model quality. Excluding near-empty classes from
+                         the headline metric is standard practice in this
+                         literature when class presence is under ~1%.
+
+This is reported transparently, not silently substituted: both numbers,
+the threshold, and exactly which classes were excluded are always printed
+and saved to summary.json.
+
+Three models across a complexity spectrum:
   Reference   RandomForest(200 trees)            — maximum accuracy baseline
   Edge        RandomForest(10 trees, depth ≤ 8)  — target: STM32 / nRF52840
   Tiny        DecisionTree(depth ≤ 6)            — target: ATmega328P (Arduino Uno)
-
-Edge and Tiny models are exported to dependency-free C via m2cgen.
-The generated .c files compile with any C99 toolchain, including arm-none-eabi-gcc.
-
-References
-----------
-m2cgen: https://github.com/BayesWitnesses/m2cgen
 """
 
 import json
@@ -22,43 +36,29 @@ from typing import Dict, Tuple, List, Any, Optional
 
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.tree import DecisionTreeClassifier
-from sklearn.model_selection import StratifiedKFold, cross_validate, cross_val_predict
-from sklearn.metrics import confusion_matrix, classification_report
+from sklearn.metrics import (
+    accuracy_score, f1_score, precision_score, recall_score,
+    confusion_matrix, classification_report,
+)
 import joblib
 import m2cgen as m2c
 
 _HERE = Path(__file__).parent
+MIN_RELIABLE_SAMPLES = 30
 
 
 def train_and_evaluate(
-    X: np.ndarray,
-    y: np.ndarray,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
     feature_names: List[str],
-    cv_folds: int = 5,
     seed: int = 42,
     output_dir: Optional[Path] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """
-    Train three models, evaluate via stratified CV, export edge models to C.
-
-    Parameters
-    ----------
-    output_dir : Path, optional
-        Root directory for results/ and models/ subfolders, and for the
-        deployments/ecg-anomaly-detection/ C export. Defaults to this
-        script's own directory (production behaviour). Tests pass an
-        explicit tmp_path here so test runs never touch real output files.
-
-    Returns
-    -------
-    models  : dict  name → fitted sklearn estimator (trained on full data)
-    results : dict  name → evaluation metrics and arrays for plotting
-    """
     base = Path(output_dir) if output_dir is not None else _HERE
     results_dir = base / "results"
     models_dir = base / "models"
-    # Production layout: experiments/ecg-anomaly-detection/ → ../../deployments/...
-    # Test layout (output_dir given): keep everything self-contained under base/.
     deploy_dir = (
         (base / "../../deployments/ecg-anomaly-detection").resolve()
         if output_dir is None
@@ -67,6 +67,21 @@ def train_and_evaluate(
 
     results_dir.mkdir(parents=True, exist_ok=True)
     models_dir.mkdir(parents=True, exist_ok=True)
+
+    train_support = _class_counts(y_train)
+    test_support = _class_counts(y_test)
+    all_labels = sorted(set(y_train.tolist()) | set(y_test.tolist()))
+
+    reliable_labels = [lbl for lbl in all_labels if _raw_count(y_train, lbl) >= MIN_RELIABLE_SAMPLES]
+    thin_labels = [lbl for lbl in all_labels if lbl not in reliable_labels]
+
+    if thin_labels:
+        from data_loader import LABEL_DECODER
+        thin_named = {LABEL_DECODER[l]: _raw_count(y_train, l) for l in thin_labels}
+        print(f"\n  ⚠  Classes below the {MIN_RELIABLE_SAMPLES}-sample reliability "
+              f"threshold in training data: {thin_named}")
+        print(f"      These are EXCLUDED from f1_macro_reliable below, but included "
+              f"in the strict f1_macro and in the full per-class report.")
 
     model_configs = {
         "reference": RandomForestClassifier(
@@ -80,68 +95,99 @@ def train_and_evaluate(
         ),
     }
 
-    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=seed)
     fitted_models: Dict[str, Any] = {}
     results: Dict[str, Any] = {}
 
     for name, clf in model_configs.items():
         print(f"\n  ── {name.upper()} ──")
 
-        # ── Cross-validated metrics ────────────────────────────────────────────
-        cv_res   = cross_validate(clf, X, y, cv=cv,
-                                  scoring=["accuracy", "f1_macro"], n_jobs=-1)
-        acc_mean = float(cv_res["test_accuracy"].mean())
-        acc_std  = float(cv_res["test_accuracy"].std())
-        f1_mean  = float(cv_res["test_f1_macro"].mean())
-        f1_std   = float(cv_res["test_f1_macro"].std())
+        clf.fit(X_train, y_train)
+        y_pred = clf.predict(X_test)
 
-        print(f"    Accuracy : {acc_mean:.3f} ± {acc_std:.3f}")
-        print(f"    Macro F1 : {f1_mean:.3f} ± {f1_std:.3f}")
+        acc = float(accuracy_score(y_test, y_pred))
+        f1_macro_strict = float(f1_score(y_test, y_pred, average="macro",
+                                          zero_division=0, labels=all_labels))
+        f1_macro_reliable = float(f1_score(y_test, y_pred, average="macro",
+                                            zero_division=0, labels=reliable_labels)) \
+            if reliable_labels else float("nan")
 
-        # ── Out-of-fold predictions for confusion matrix ───────────────────────
-        # Uses the SAME cv splits as cross_validate above (same seed + StratifiedKFold).
-        # Honest held-out predictions — NOT in-sample, which would inflate the matrix
-        # relative to the reported CV accuracy above.
-        y_pred_oof = cross_val_predict(clf, X, y, cv=cv)
-        cm         = confusion_matrix(y, y_pred_oof)
-        report     = classification_report(y, y_pred_oof, zero_division=0)
+        per_class_precision = precision_score(y_test, y_pred, average=None,
+                                                zero_division=0, labels=all_labels)
+        per_class_recall = recall_score(y_test, y_pred, average=None,
+                                         zero_division=0, labels=all_labels)
+        per_class_f1 = f1_score(y_test, y_pred, average=None,
+                                 zero_division=0, labels=all_labels)
 
-        # ── Final fit on full dataset (for deployment) ─────────────────────────
-        clf.fit(X, y)
+        cm = confusion_matrix(y_test, y_pred, labels=all_labels)
+        report_text = classification_report(y_test, y_pred, zero_division=0, labels=all_labels)
+
+        print(f"    DS2 accuracy             : {acc:.4f}")
+        print(f"    DS2 macro F1 (strict)    : {f1_macro_strict:.4f}  (all {len(all_labels)} classes)")
+        print(f"    DS2 macro F1 (reliable)  : {f1_macro_reliable:.4f}  "
+              f"({len(reliable_labels)} classes with >= {MIN_RELIABLE_SAMPLES} train samples)")
+        print(f"\n{_indent(report_text)}")
+
         fitted_models[name] = clf
         n_nodes = _count_nodes(clf)
 
+        per_class_table = {
+            _class_name(lbl): {
+                "train_n": _raw_count(y_train, lbl),
+                "test_n": _raw_count(y_test, lbl),
+                "precision": round(float(p), 4),
+                "recall": round(float(r), 4),
+                "f1": round(float(f), 4),
+            }
+            for lbl, p, r, f in zip(all_labels, per_class_precision, per_class_recall, per_class_f1)
+        }
+
         results[name] = {
-            "accuracy":           acc_mean,
-            "accuracy_std":       acc_std,
-            "f1_macro":           f1_mean,
-            "f1_std":             f1_std,
-            "y_true":             y,
-            "y_pred":             y_pred_oof,   # OOF — consistent with reported metrics
-            "confusion_matrix":   cm,
-            "report":             report,
-            "n_nodes":            n_nodes,
+            "accuracy": acc,
+            "f1_macro": f1_macro_strict,
+            "f1_macro_reliable": f1_macro_reliable,
+            "y_true": y_test,
+            "y_pred": y_pred,
+            "confusion_matrix": cm,
+            "confusion_matrix_labels": all_labels,
+            "report": report_text,
+            "per_class": per_class_table,
+            "train_support": train_support,
+            "test_support": test_support,
+            "n_nodes": n_nodes,
             "feature_importances": _get_importances(clf),
-            "feature_names":      feature_names,
+            "feature_names": feature_names,
         }
 
         joblib.dump(clf, models_dir / f"{name}.joblib")
+        (results_dir / f"classification_report_{name}.txt").write_text(report_text)
 
         if name in ("edge", "tiny"):
             _export_to_c(clf, name, feature_names, results_dir, deploy_dir)
 
-    # ── Summary table ──────────────────────────────────────────────────────────
-    print("\n  ── ACCURACY vs MODEL SIZE ──")
-    print(f"  {'Model':<12} {'Accuracy':>10} {'Macro F1':>10} {'Nodes':>8}")
+    print("\n  ── DS2 HELD-OUT TEST RESULTS ──")
+    print(f"  {'Model':<12} {'Accuracy':>10} {'F1 strict':>10} {'F1 reliable':>12} {'Nodes':>8}")
     for name in ("reference", "edge", "tiny"):
         r = results[name]
-        print(f"  {name:<12} {r['accuracy']:>10.3f} {r['f1_macro']:>10.3f} {r['n_nodes']:>8,d}")
+        print(f"  {name:<12} {r['accuracy']:>10.4f} {r['f1_macro']:>10.4f} "
+              f"{r['f1_macro_reliable']:>12.4f} {r['n_nodes']:>8,d}")
 
     summary = {
-        k: {"accuracy": round(v["accuracy"], 4),
-            "f1_macro":  round(v["f1_macro"],  4),
-            "n_nodes":   v["n_nodes"]}
+        k: {
+            "accuracy": round(v["accuracy"], 4),
+            "f1_macro": round(v["f1_macro"], 4),
+            "f1_macro_reliable": round(v["f1_macro_reliable"], 4) if v["f1_macro_reliable"] == v["f1_macro_reliable"] else None,
+            "n_nodes": v["n_nodes"],
+            "per_class": v["per_class"],
+        }
         for k, v in results.items()
+    }
+    summary["_metadata"] = {
+        "min_reliable_samples_threshold": MIN_RELIABLE_SAMPLES,
+        "thin_classes_excluded_from_reliable_f1": [
+            _class_name(l) for l in thin_labels
+        ],
+        "train_support": train_support,
+        "test_support": test_support,
     }
     (results_dir / "summary.json").write_text(json.dumps(summary, indent=2))
 
@@ -150,17 +196,33 @@ def train_and_evaluate(
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _export_to_c(
-    clf, name: str, feature_names: List[str], results_dir: Path, deploy_dir: Path,
-) -> None:
-    """Export a fitted sklearn model to dependency-free C inference code."""
-    c_code = m2c.export_to_c(clf)
+def _class_name(label: int) -> str:
+    from data_loader import LABEL_DECODER
+    return LABEL_DECODER[int(label)]
 
+
+def _class_counts(y: np.ndarray) -> Dict[str, int]:
+    unique, counts = np.unique(y, return_counts=True)
+    return {_class_name(int(u)): int(c) for u, c in zip(unique, counts)}
+
+
+def _raw_count(y: np.ndarray, label: int) -> int:
+    return int(np.sum(y == label))
+
+
+def _indent(text: str, prefix: str = "      ") -> str:
+    return "\n".join(prefix + line for line in text.splitlines())
+
+
+def _export_to_c(clf, name, feature_names, results_dir, deploy_dir) -> None:
+    c_code = m2c.export_to_c(clf)
     header = (
         f"/* Auto-generated by m2cgen — DO NOT EDIT MANUALLY\n"
         f" *\n"
         f" * Model    : {name}\n"
         f" * Features : {', '.join(feature_names)}\n"
+        f" * Trained  : DS1 (de Chazal et al. 2004 inter-patient split)\n"
+        f" * Tested   : DS2 (held-out patients, never seen during training)\n"
         f" *\n"
         f" * Usage\n"
         f" *   double output[N_CLASSES];\n"

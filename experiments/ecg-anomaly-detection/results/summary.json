@@ -1,17 +1,151 @@
 {
   "reference": {
-    "accuracy": 0.9796,
-    "f1_macro": 0.6403,
-    "n_nodes": 20776
+    "accuracy": 0.9201,
+    "f1_macro": 0.4146,
+    "f1_macro_reliable": 0.5183,
+    "n_nodes": 283328,
+    "per_class": {
+      "Normal (N)": {
+        "train_n": 45824,
+        "test_n": 44218,
+        "precision": 0.9572,
+        "recall": 0.9579,
+        "f1": 0.9575
+      },
+      "Supraventricular (S)": {
+        "train_n": 943,
+        "test_n": 1836,
+        "precision": 0.254,
+        "recall": 0.0942,
+        "f1": 0.1375
+      },
+      "Ventricular (V)": {
+        "train_n": 3788,
+        "test_n": 3219,
+        "precision": 0.8417,
+        "recall": 0.9683,
+        "f1": 0.9006
+      },
+      "Fusion (F)": {
+        "train_n": 414,
+        "test_n": 388,
+        "precision": 0.0533,
+        "recall": 0.1418,
+        "f1": 0.0775
+      },
+      "Unclassifiable (Q)": {
+        "train_n": 8,
+        "test_n": 7,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0
+      }
+    }
   },
   "edge": {
-    "accuracy": 0.9722,
-    "f1_macro": 0.6687,
-    "n_nodes": 920
+    "accuracy": 0.8295,
+    "f1_macro": 0.4091,
+    "f1_macro_reliable": 0.5113,
+    "n_nodes": 3296,
+    "per_class": {
+      "Normal (N)": {
+        "train_n": 45824,
+        "test_n": 44218,
+        "precision": 0.9689,
+        "recall": 0.8442,
+        "f1": 0.9022
+      },
+      "Supraventricular (S)": {
+        "train_n": 943,
+        "test_n": 1836,
+        "precision": 0.1956,
+        "recall": 0.274,
+        "f1": 0.2283
+      },
+      "Ventricular (V)": {
+        "train_n": 3788,
+        "test_n": 3219,
+        "precision": 0.6222,
+        "recall": 0.9435,
+        "f1": 0.7499
+      },
+      "Fusion (F)": {
+        "train_n": 414,
+        "test_n": 388,
+        "precision": 0.0913,
+        "recall": 0.8505,
+        "f1": 0.1649
+      },
+      "Unclassifiable (Q)": {
+        "train_n": 8,
+        "test_n": 7,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0
+      }
+    }
   },
   "tiny": {
-    "accuracy": 0.9587,
-    "f1_macro": 0.5558,
-    "n_nodes": 83
+    "accuracy": 0.7082,
+    "f1_macro": 0.3242,
+    "f1_macro_reliable": 0.4053,
+    "n_nodes": 121,
+    "per_class": {
+      "Normal (N)": {
+        "train_n": 45824,
+        "test_n": 44218,
+        "precision": 0.9649,
+        "recall": 0.7099,
+        "f1": 0.818
+      },
+      "Supraventricular (S)": {
+        "train_n": 943,
+        "test_n": 1836,
+        "precision": 0.1811,
+        "recall": 0.2843,
+        "f1": 0.2213
+      },
+      "Ventricular (V)": {
+        "train_n": 3788,
+        "test_n": 3219,
+        "precision": 0.2963,
+        "recall": 0.9307,
+        "f1": 0.4495
+      },
+      "Fusion (F)": {
+        "train_n": 414,
+        "test_n": 388,
+        "precision": 0.0732,
+        "recall": 0.6959,
+        "f1": 0.1325
+      },
+      "Unclassifiable (Q)": {
+        "train_n": 8,
+        "test_n": 7,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0
+      }
+    }
+  },
+  "_metadata": {
+    "min_reliable_samples_threshold": 30,
+    "thin_classes_excluded_from_reliable_f1": [
+      "Unclassifiable (Q)"
+    ],
+    "train_support": {
+      "Normal (N)": 45824,
+      "Supraventricular (S)": 943,
+      "Ventricular (V)": 3788,
+      "Fusion (F)": 414,
+      "Unclassifiable (Q)": 8
+    },
+    "test_support": {
+      "Normal (N)": 44218,
+      "Supraventricular (S)": 1836,
+      "Ventricular (V)": 3219,
+      "Fusion (F)": 388,
+      "Unclassifiable (Q)": 7
+    }
   }
 }

@@ -1,14 +1,9 @@
 """
-Parity tests for the m2cgen C export.
+Parity tests for the m2cgen C export (24-feature models: 20 morphology + 4 RR).
 
-These compile the generated C with gcc and verify that predictions from the
-compiled binary EXACTLY match sklearn's predictions on the same feature rows.
-This is the test that actually matters for this project: a C export that
-compiles cleanly but predicts differently than the Python model it came from
-is a silent, dangerous bug — exactly the kind of thing that looks fine in a
-demo and fails in deployment.
-
-Requires gcc. Skipped automatically if unavailable (e.g. minimal CI images).
+Compiles the generated C with gcc and verifies predictions from the
+compiled binary EXACTLY match sklearn's predictions on the same rows.
+Requires gcc. Skipped automatically if unavailable.
 """
 
 import shutil
@@ -27,8 +22,7 @@ GCC_AVAILABLE = shutil.which("gcc") is not None
 
 
 def _compile_and_run(c_file: Path, feature_rows: np.ndarray, tmp_path: Path) -> list:
-    """Compile a small C harness against the exported model and return
-    the predicted class index for each row, as computed by the compiled C."""
+    n_features = feature_rows.shape[1]
     rows_literal = ",\n".join(
         "{" + ", ".join(f"{v:.12f}" for v in row) + "}" for row in feature_rows
     )
@@ -41,7 +35,7 @@ def _compile_and_run(c_file: Path, feature_rows: np.ndarray, tmp_path: Path) -> 
             return b;
         }}
         int main() {{
-            double rows[{len(feature_rows)}][{feature_rows.shape[1]}] = {{
+            double rows[{len(feature_rows)}][{n_features}] = {{
                 {rows_literal}
             }};
             double output[5];
@@ -69,17 +63,20 @@ def _compile_and_run(c_file: Path, feature_rows: np.ndarray, tmp_path: Path) -> 
 
 
 @pytest.mark.skipif(not GCC_AVAILABLE, reason="gcc not available in this environment")
-def test_edge_model_c_export_matches_sklearn(synthetic_beats_labels, tmp_path):
-    import joblib
+def test_edge_model_c_export_matches_sklearn(synthetic_train_test, tmp_path):
     import model as model_module
 
-    beats, labels = synthetic_beats_labels
-    X, y, feature_names = extract_beat_features(beats, labels)
+    beats_train, labels_train, rr_train, beats_test, labels_test, rr_test = synthetic_train_test
+    X_train, y_train, feature_names = extract_beat_features(beats_train, labels_train, rr_train)
+    X_test, y_test, _ = extract_beat_features(beats_test, labels_test, rr_test)
+
+    assert len(feature_names) == 24  # guard: this test must exercise the real feature count
+
     fitted_models, _ = model_module.train_and_evaluate(
-        X, y, feature_names, output_dir=tmp_path
+        X_train, y_train, X_test, y_test, feature_names, output_dir=tmp_path
     )
 
-    test_rows = X[:10]
+    test_rows = X_test[:10]
     sklearn_preds = fitted_models["edge"].predict(test_rows).tolist()
 
     c_file = tmp_path / "results" / "ecg_edge.c"
@@ -92,16 +89,18 @@ def test_edge_model_c_export_matches_sklearn(synthetic_beats_labels, tmp_path):
 
 
 @pytest.mark.skipif(not GCC_AVAILABLE, reason="gcc not available in this environment")
-def test_tiny_model_c_export_matches_sklearn(synthetic_beats_labels, tmp_path):
+def test_tiny_model_c_export_matches_sklearn(synthetic_train_test, tmp_path):
     import model as model_module
 
-    beats, labels = synthetic_beats_labels
-    X, y, feature_names = extract_beat_features(beats, labels)
+    beats_train, labels_train, rr_train, beats_test, labels_test, rr_test = synthetic_train_test
+    X_train, y_train, feature_names = extract_beat_features(beats_train, labels_train, rr_train)
+    X_test, y_test, _ = extract_beat_features(beats_test, labels_test, rr_test)
+
     fitted_models, _ = model_module.train_and_evaluate(
-        X, y, feature_names, output_dir=tmp_path
+        X_train, y_train, X_test, y_test, feature_names, output_dir=tmp_path
     )
 
-    test_rows = X[:10]
+    test_rows = X_test[:10]
     sklearn_preds = fitted_models["tiny"].predict(test_rows).tolist()
 
     c_file = tmp_path / "results" / "ecg_tiny.c"
