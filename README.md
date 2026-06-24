@@ -1,7 +1,7 @@
 # tinyml-explorations
 
 Software-side TinyML experiments — training and exporting models destined for
-microcontrollers, devel before hardware arrives.
+microcontrollers, devbefore hardware arrives.
 
 The premise:write deployment-ready inference code on a laptop today,
 flash it to a microcontroller the moment hardware is available.
