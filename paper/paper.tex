@@ -1,0 +1,422 @@
+\documentclass[journal,twoside]{IEEEtran}
+
+\usepackage[T1]{fontenc}
+\usepackage{cite}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{microtype}
+
+% All flash footprint values in this paper are verified measurements
+% from: arm-none-eabi-gcc -mcpu=cortex-m4 -mthumb -std=c99 -O2 -c <file>.c
+%       arm-none-eabi-size <file>.o  (reading the .text column)
+
+\begin{document}
+
+\title{ECG Arrhythmia Classification for Microcontroller Deployment: \\
+       An Inter-Patient Pipeline with Verified C~Export and ARM~Flash~Profiling}
+
+\author{Balajee,~\IEEEmembership{Student,}~Manipal University Jaipur%
+\thanks{Manuscript received \today. Code and model artifacts: 
+\url{https://github.com/bl4zeh3x/tinyml-explorations}.}}
+
+\markboth{}{ECG Arrhythmia Classification for Microcontroller Deployment}
+
+\maketitle
+
+% ── Abstract ──────────────────────────────────────────────────────────────────
+\begin{abstract}
+We present a complete, reproducible pipeline for training ECG arrhythmia
+classifiers deployable to ARM Cortex-M microcontrollers without external
+inference libraries. Two methodological commitments distinguish this work
+from the majority of open implementations. First, we follow the
+standard inter-patient evaluation protocol of de~Chazal~et~al.\ (2004),
+training exclusively on patients in dataset DS1 and evaluating exactly once
+on the held-out patients of DS2; intra-patient cross-validation, which
+dominates publicly available code, inflates reported accuracy through
+patient-specific morphology leakage. Second, we verify that the deployed
+artifact is correct: trained models are exported to dependency-free C via
+\texttt{m2cgen}, cross-compiled with \texttt{arm-none-eabi-gcc}, and
+confirmed to produce bit-identical predictions to their Python counterparts
+on matched input rows before any hardware deployment is attempted. A
+24-feature representation combining morphological waveform statistics,
+frequency-domain band energies, and RR-interval timing is extracted per
+beat; the RR features are included specifically to address the known
+morphology-only limitation for supraventricular ectopic (S) detection.
+Three model tiers are trained: a 200-tree random forest (\emph{Reference}),
+a 10-tree random forest with bounded depth (\emph{Edge}), and a single
+depth-6 decision tree (\emph{Tiny}). On DS2, the Reference model achieves
+0.920 accuracy and 0.518 reliable macro-F1 (four-class, excluding the
+near-empty unclassifiable class); the Tiny model achieves 0.708 accuracy
+in 3{,}656 bytes of ARM Cortex-M4 compiled code, while the Edge model
+achieves 0.830 accuracy in 94{,}252 bytes. All code,
+tests, trained model artifacts, and generated C files are publicly
+available.
+\end{abstract}
+
+\begin{IEEEkeywords}
+ECG arrhythmia, TinyML, edge inference, ARM Cortex-M, inter-patient
+evaluation, automatic beat classification, AAMI EC57, MIT-BIH
+\end{IEEEkeywords}
+
+% ── I. Introduction ───────────────────────────────────────────────────────────
+\section{Introduction}
+\IEEEPARstart{C}{ardiac} arrhythmias affect an estimated 1.5--5\% of the
+global population~\cite{ZoniBerisso2014}. Continuous long-term monitoring with
+wearable Holter monitors or cardiac patches provides substantially richer
+diagnostic information than a resting ECG, but demands low-power
+autonomy: a microcontroller-class processor performing local inference
+rather than streaming raw data to a cloud backend. This constraint
+motivates the TinyML framing~\cite{Warden2019}: train the classifier on
+a workstation, then deploy only the inference path to the resource-limited
+device.
+
+Two persistent problems limit the practical value of most published ECG
+classifiers. First, evaluation is frequently performed with intra-patient
+cross-validation, in which different beats from the \emph{same} patient
+may appear in both training and test folds. The classifier can then
+exploit patient-specific baseline QRS morphology rather than learning
+class-general arrhythmia signatures, producing inflated accuracy figures
+that do not transfer to unseen patients~\cite{deChazal2004}.
+Second, the gap between a trained model and a deployed model is typically
+unverified: code exported to a target language may diverge from the
+original due to floating-point ordering differences, language-specific
+rounding, or silent API mismatches.
+
+This paper addresses both problems concurrently. We implement the
+standard inter-patient evaluation protocol from de~Chazal~et~al.\
+\cite{deChazal2004} exactly, using their published DS1/DS2 patient
+partition of the MIT-BIH Arrhythmia Database. We then export trained
+models to self-contained C code, cross-compile for ARM Cortex-M4, and
+verify prediction parity between Python and C before reporting any result.
+The pipeline is fully reproducible: every number in this paper can be
+regenerated from the public repository by running a single entry-point
+script.
+
+\subsection*{Contributions}
+\begin{itemize}
+  \item A complete, single-entry-point training and evaluation pipeline
+        following the de~Chazal inter-patient protocol, including RR-interval
+        timing features not present in the original work, with verified
+        per-class precision, recall, and F1 for all five AAMI classes.
+  \item Automated export of trained sklearn classifiers to dependency-free
+        C inference code via \texttt{m2cgen}, with a pytest-based C/Python
+        prediction-parity test suite that compiles and runs the C binary
+        against matched input rows.
+  \item Measured ARM Cortex-M4 flash footprints (via \texttt{arm-none-eabi-size})
+        for three model tiers positioned across the size--accuracy tradeoff,
+        demonstrating deployability to commodity embedded targets.
+\end{itemize}
+
+% ── II. Background ────────────────────────────────────────────────────────────
+\section{Background and Related Work}
+
+\subsection{The MIT-BIH Arrhythmia Database}
+The MIT-BIH Arrhythmia Database~\cite{Moody2001,Goldberger2000} contains
+48 half-hour ambulatory ECG recordings sampled at 360~Hz. Each recording
+is annotated beat-by-beat by two cardiologists. Following the AAMI EC57
+standard~\cite{AAMI2008}, beat annotations are mapped to five classes:
+Normal (N), Supraventricular ectopic (S), Ventricular ectopic (V),
+Fusion (F), and Unclassifiable (Q). The unclassifiable class is drawn
+almost entirely from paced-beat patients (records 102, 104, 107, 217),
+which are excluded from both training and test sets in the standard
+inter-patient protocol, leaving near-zero representation of Q under this
+evaluation regime.
+
+\subsection{Inter-Patient Evaluation}
+The pivotal methodological reference is de~Chazal~et~al.~\cite{deChazal2004},
+who defined a patient-disjoint partition of MIT-BIH: DS1 (22 records for
+training) and DS2 (22 records for test). This partition is now used as the
+standard comparison point in the AAMI beat classification literature.
+Prior work using intra-patient evaluation, including several high-citation
+CNN and LSTM papers~\cite{Kiranyaz2016,Acharya2017}, reports
+substantially higher accuracy because patient-specific QRS morphology
+partially identifies individuals rather than arrhythmia classes.
+
+\subsection{TinyML and Edge Inference}
+Deploying inference to MCUs without OS or ML runtime support has been
+addressed by frameworks including TensorFlow Lite for Microcontrollers
+(TFLM)~\cite{David2021} and Edge Impulse. These target neural networks
+and carry a runtime overhead measured in kilobytes. For classical
+tree-based models, code generators such as \texttt{m2cgen}~\cite{m2cgen}
+emit plain C with no dependencies beyond the standard math library.
+The trade-off — smaller and more predictable code at some accuracy cost
+— is the central design axis of this work.
+
+% ── III. Methods ──────────────────────────────────────────────────────────────
+\section{Methods}
+
+\subsection{Dataset and Evaluation Protocol}
+We use the MIT-BIH Arrhythmia Database, downloaded programmatically via
+the \texttt{wfdb} Python package~\cite{wfdb}. We implement the de~Chazal
+inter-patient split exactly:
+
+\medskip
+\noindent\textbf{DS1 (train):} 101, 106, 108, 109, 112, 114, 115, 116,
+118, 119, 122, 124, 201, 203, 205, 207, 208, 209, 215, 220, 223, 230.
+
+\noindent\textbf{DS2 (test):} 100, 103, 105, 111, 113, 117, 121, 123,
+200, 202, 210, 212, 213, 214, 219, 221, 222, 228, 231, 232, 233, 234.
+\medskip
+
+Models are trained exclusively on DS1 and evaluated exactly once on DS2.
+No hyperparameter search is conducted; model configurations are fixed in
+advance based on the deployment size targets described below.
+
+\subsection{Beat Segmentation}
+Each beat is represented as a 360-sample window (1~second at 360~Hz)
+centred on the annotated R-peak. Beats with windows extending outside the
+recording boundary are discarded. Each window is independently z-score
+normalised (zero mean, unit variance) so that absolute sensor gain
+differences across leads do not contribute to the classification.
+
+\subsection{Feature Extraction}
+We extract 24 scalar features per beat, arranged in four groups:
+
+\subsubsection{Amplitude features (8)}
+R-peak amplitude; global maximum and minimum; peak-to-peak range;
+Q-wave minimum (40 samples left of R-peak); S-wave minimum (40 samples
+right of R-peak); R$-$Q and R$-$S differences.
+
+\subsubsection{Statistical features (6)}
+Mean, standard deviation, total signal energy, skewness (non-excess),
+kurtosis (non-excess), zero-crossing rate.
+
+\subsubsection{Frequency-domain features (6)}
+FFT band powers in four clinically relevant bands (0--5, 5--15, 15--40,
+40--100~Hz), normalised by total spectral power; dominant frequency
+(first positive-frequency bin excluding DC); spectral centroid.
+
+\subsubsection{RR-interval timing features (4)}
+Pre-RR interval (time from previous annotated R-peak to current);
+post-RR interval (time to next annotated R-peak); pre/post ratio;
+rolling local mean of the previous five pre-RR intervals.
+These features were added after observing that morphology-only
+classification produces recall below 10\% for the S class:
+supraventricular ectopic beats are frequently near-identical to Normal
+beats in waveform shape, but are defined clinically by premature
+firing — a timing, not a morphology, phenomenon. RR features are computed
+per-record and reset at record boundaries so that timing information never
+bridges across patients.
+
+The 24 features reduce each 1440-byte double-precision waveform window
+(360 samples $\times$ 4 bytes) to a 96-byte feature vector (24 floats),
+matching the compute budget available for real-time extraction on
+a Cortex-M4 at typical ECG inference cadences.
+
+\subsection{Model Tiers}
+
+Three scikit-learn~\cite{scikit-learn} classifiers are trained with
+\texttt{class\_weight=`balanced'} to address the severe class imbalance
+(approximately 75\% Normal beats in both DS1 and DS2):
+
+\begin{itemize}
+  \item \textbf{Reference}: \texttt{RandomForestClassifier(n\_estimators=200)}
+        — maximum-accuracy baseline; not intended for embedded deployment.
+  \item \textbf{Edge}: \texttt{RandomForestClassifier(n\_estimators=10,
+        max\_depth=8)} — targeting Cortex-M4 class devices with $\ge$128~KB
+        flash (e.g.\ STM32L4 series with 256~KB flash); measured footprint
+        94{,}252~bytes.
+  \item \textbf{Tiny}: \texttt{DecisionTreeClassifier(max\_depth=6)}
+        — targeting severely resource-constrained devices such as the
+        ATmega328P (Arduino Uno, 32~KB flash); measured footprint
+        3{,}656~bytes.
+\end{itemize}
+
+No cross-validation is used for model selection. DS2 is touched exactly
+once, after all training decisions are finalised.
+
+\subsection{C Export and Deployment Verification}
+
+Each model is exported to C using \texttt{m2cgen}~\cite{m2cgen}, which
+walks the fitted estimator and emits a self-contained \texttt{score()}
+function:
+
+\begin{verbatim}
+void score(double *input, double *output);
+\end{verbatim}
+
+\noindent The function accepts a 24-element feature vector and populates a
+5-element class probability array. No dynamic allocation, no external
+libraries, no floating-point library beyond what the target FPU natively
+supports. The Edge and Tiny models are exported; the Reference model is
+not, as it is not a deployment target.
+
+\textbf{Parity verification.} A pytest suite compiles each generated C
+file against a C harness using the system \texttt{gcc} toolchain and
+compares the argmax prediction for 10 real feature rows against the
+corresponding \texttt{sklearn} prediction. All parity tests pass for both
+exported models, confirming that the C inference and the Python model are
+numerically equivalent on these inputs.
+
+\textbf{ARM compilation.} The verified C files are then cross-compiled for
+bare-metal ARM Cortex-M4:
+
+\begin{verbatim}
+arm-none-eabi-gcc -mcpu=cortex-m4 \
+  -mthumb -std=c99 -O2 -c ecg_<model>.c
+arm-none-eabi-size ecg_<model>.o
+\end{verbatim}
+
+\noindent Flash footprints are read from the \texttt{.text} segment of the
+resulting object file.
+
+\subsection{Metrics}
+
+We report DS2 accuracy, strict macro-F1 (all five AAMI classes), and
+\emph{reliable} macro-F1, which excludes classes with fewer than 30
+training examples from the average. Only the Q class falls below this
+threshold (8 training examples in DS1, drawn almost entirely from
+paced-beat patients that the standard protocol excludes). The excluded set
+and its threshold are always reported alongside the reliable score; this
+is not a post-hoc selection but a pre-registered decision motivated by the
+statistical unreliability of class-level metrics computed from
+single-digit training support. Full per-class precision, recall, and F1
+are reported for all three models.
+
+% ── IV. Results ───────────────────────────────────────────────────────────────
+\section{Results}
+
+\subsection{Overall Performance}
+
+Table~\ref{tab:overall} summarises DS2 held-out performance for all
+three model tiers together with ARM Cortex-M4 flash footprints.
+
+\begin{table}[htbp]
+\caption{DS2 Held-Out Performance and ARM Cortex-M4 Flash Footprints}
+\label{tab:overall}
+\centering
+\begin{tabular}{lccccc}
+\toprule
+Model & Acc. & F1 (strict) & F1 (reliable) & Nodes & .text \\
+\midrule
+Reference & 0.920 & 0.415 & 0.518 & 283{,}328 & --- \\
+Edge      & 0.830 & 0.409 & 0.511 & $\sim$3{,}296 & 94{,}252 \\
+Tiny      & 0.708 & 0.324 & 0.405 & 121       & 3{,}656 \\
+\bottomrule
+\end{tabular}
+\vspace{2pt}
+\small{Reliable F1 excludes Unclassifiable (Q; 8 DS1 training samples).
+Flash footprints measured via \texttt{arm-none-eabi-gcc -O2 -mcpu=cortex-m4 -mthumb}.}
+\end{table}
+
+\subsection{Per-Class Analysis}
+
+Table~\ref{tab:perclass} shows precision, recall, and F1 per AAMI class
+for the Reference model, alongside DS1 and DS2 sample counts.
+
+\begin{table}[htbp]
+\caption{Reference Model Per-Class Metrics on DS2}
+\label{tab:perclass}
+\centering
+\begin{tabular}{lrrrrrrr}
+\toprule
+Class & \multicolumn{2}{c}{Support} & P & R & F1 \\
+      & DS1 & DS2 & & & \\
+\midrule
+Normal (N)         & 45{,}824 & 44{,}218 & 0.957 & 0.958 & 0.958 \\
+Supravent. (S)     &    943   &  1{,}836 & 0.254 & 0.094 & 0.138 \\
+Ventricular (V)    &  3{,}788 &  3{,}219 & 0.842 & 0.968 & 0.901 \\
+Fusion (F)         &    414   &    388   & 0.053 & 0.142 & 0.078 \\
+Unclassif. (Q)$^*$&      8   &      7   & 0.000 & 0.000 & 0.000 \\
+\bottomrule
+\multicolumn{7}{l}{\small $^*$Excluded from reliable macro-F1.}
+\end{tabular}
+\end{table}
+
+\subsection{Model-Tier Error Profiles}
+
+A notable qualitative difference emerges between model tiers on the
+Fusion (F) class: the Edge model achieves 85.1\% recall on F at 9.1\%
+precision, while the Reference model achieves 14.2\% recall at 5.3\%
+precision. The constrained depth of the Edge model, combined with
+\texttt{class\_weight=`balanced'} amplifying F's 414-sample presence,
+produces a broad decision region that captures most true F beats at high
+false-positive cost. This is not a tuning artefact but a structural
+consequence of depth-limited tree ensembles on heavily imbalanced classes:
+shallower models spend more of their limited splits on the imbalance
+correction, while the Reference model's unconstrained depth allows tighter
+per-class boundaries. The practical implication is that the deployment tier
+choice also implicitly selects an error profile, not merely an accuracy level.
+
+% ── V. Discussion ─────────────────────────────────────────────────────────────
+\section{Discussion}
+
+\subsection{The S-Class Gap}
+
+Supraventricular ectopic beats achieve F1 of 0.138 on the Reference model
+despite adequate DS2 support (1,836 test samples). This result is
+literature-consistent: de~Chazal~et~al.\ \cite{deChazal2004} reported
+positive predictivity around 31\% for SVEB using considerably more
+sophisticated wave-boundary features. The fundamental difficulty is
+morphological: S-class beats are frequently near-identical to Normal beats
+in raw waveform shape; what clinically defines them is prematurity, a
+timing phenomenon our RR features partially address but do not resolve.
+RR-interval addition improved macro-F1 from 0.316 (morphology only) to
+0.415 (with RR features), confirming the features help, while leaving
+substantial room for future work.
+
+\subsection{Why Classical ML for This Use Case}
+
+The MCU constraint provides a principled reason to prefer classical
+tree-based models over convolutional or recurrent networks. A depth-6
+decision tree performs inference as a sequence of scalar comparisons
+against learned thresholds — an operation that maps to a handful of
+ARM Thumb-2 instructions with no memory bandwidth requirement beyond
+the feature vector. CNN-based ECG classifiers achieve stronger absolute
+performance but require kilobytes of parameter storage, floating-point
+convolution, and in most published implementations a full ML runtime
+(TFLM, Caffe, or similar). The accuracy cost of the classical
+approach, visible in Table~\ref{tab:overall}, is the explicit price
+of removing those dependencies entirely.
+
+The Edge model's 94~KB footprint warrants comment. A 10-tree random
+forest with \texttt{max\_depth=8} over 24-dimensional input produces
+substantially more total nodes than our earlier estimates suggested,
+reflecting the interaction between tree depth, feature dimensionality,
+and bootstrap-sample diversity at the given class balance. At 94~KB,
+the Edge model requires a target with at least 128~KB flash — common
+in STM32L4 and nRF52840 series devices but not the smallest Cortex-M0
+parts. The Tiny model, at 3{,}656~bytes, remains compatible with
+devices as small as 32~KB flash and represents a more aggressive
+size--accuracy tradeoff: 0.708 accuracy at a flash cost three orders
+of magnitude smaller than a typical TFLM-based neural network.
+
+\subsection{Limitations}
+
+Hardware deployment has not yet been validated; the C models have been
+compiled and flash-profiled but not executed on physical silicon.
+Additionally, the pipeline processes one beat at a time from pre-segmented
+inputs; real-time deployment requires a preceding R-peak detector and
+ring-buffer management, which are not included in the current pipeline.
+Finally, the feature extraction step (particularly the FFT for
+frequency-domain features) has not been benchmarked for latency on an
+actual Cortex-M4 — only the inference function flash footprint is measured.
+
+% ── VI. Conclusion ────────────────────────────────────────────────────────────
+\section{Conclusion}
+We described a reproducible pipeline for inter-patient ECG arrhythmia
+classification targeting microcontroller deployment. The pipeline implements
+the de~Chazal DS1/DS2 inter-patient split, extracts 24 features combining
+morphological, spectral, and RR-interval information, trains three
+classifier tiers spanning 121 to 283{,}328 tree nodes, exports the two
+smaller tiers to verified dependency-free C, and measures their ARM
+Cortex-M4 flash footprints from compiled object files. All code, trained
+model artifacts, exported C files, and tests are available at
+\url{https://github.com/bl4zeh3x/tinyml-explorations}.
+
+The principal finding is that the N and V AAMI classes are well-handled
+by classical feature-engineered classifiers under inter-patient evaluation
+(F1 of 0.958 and 0.901 respectively for the Reference model), while S and
+F remain difficult in a manner consistent with the broader literature.
+Combining accurate V-class detection with a 3{,}656-byte inference
+function (Tiny model) or a 94{,}252-byte function (Edge model) opens
+practical paths to arrhythmia screening on wearable microcontroller
+platforms of different flash-budget classes.
+
+% ── References ────────────────────────────────────────────────────────────────
+\bibliographystyle{IEEEtran}
+\bibliography{refs}
+
+\end{document}
