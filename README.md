@@ -34,6 +34,6 @@ Every experiment produces:
 
 ---
 
-**Hardware**: nRF52840 DK / STM32 Nucleo (arriving with college enrollment, July 2026)  
+**Hardware**: nRF52840 DK / STM32 Nucleo
 **Language**: Python for training · C for deployment  
 **Author**: [@bl4zeh3x](https://github.com/bl4zeh3x)
