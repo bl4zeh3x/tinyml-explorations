@@ -65,6 +65,18 @@ def extract_beat_features(
     y            : ndarray, shape (n_valid,)
     feature_names: list of 24 feature name strings
     """
+    if beats.ndim != 2 or beats.shape[1] == 0:
+        raise ValueError("beats must be a 2D array with at least one sample per beat")
+    if labels.ndim != 1:
+        raise ValueError("labels must be a 1D array")
+    if rr_features.ndim != 2 or rr_features.shape[1] != 4:
+        raise ValueError("rr_features must have shape (n_beats, 4)")
+    if len(beats) == 0:
+        raise ValueError("at least one beat is required")
+    if len(beats) != len(labels):
+        raise ValueError(
+            f"beats ({len(beats)}) and labels ({len(labels)}) must be row-aligned"
+        )
     if len(beats) != len(rr_features):
         raise ValueError(
             f"beats ({len(beats)}) and rr_features ({len(rr_features)}) "
